@@ -51,7 +51,7 @@ The virtual environment is recommended but not mandatory if these dependencies a
 Run from the workspace root:
 
 ```bash
-python monthly_water_billing.py --month "<Month> <Year>" --pdf
+python monthly_water_billing.py --month "<Month> <Year>" --config config/nn_water.json --pdf
 ```
 
 By default, the command resolves paths as follows:
@@ -64,6 +64,8 @@ policy:  skills.md in the launch directory
 ```
 
 The command updates the selected reading and cost columns, validates all meter identifiers and policy inputs, and creates Society-facing and NoBroker Hood Excel/PDF bills. Optional path arguments can override any default. If OCR cannot identify every reading, it stops before updating the workbook and writes an `*_input_review.json` report. Reviewed values can be supplied with `--readings-json`.
+
+Use `--config` for a different apartment. Copy `config/nn_water.json`, then change the worksheet names, meter prefixes, vendor rates, tank capacity, faulty solar series, and output naming in the copy. The calculation code remains unchanged.
 
 ## Demo month
 

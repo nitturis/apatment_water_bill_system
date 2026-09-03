@@ -7,9 +7,12 @@ Run the canonical `monthly_water_billing.py` from the workspace root with the mo
 
 ```text
 --month "August 2026"
+--config config/nn_water.json
 ```
 
 Defaults are resolved from the month: images from `<year>/<Month>/input`, the workbook from `<year>/NN_WM_water.xlsx`, with `<year>/NN_MM_water.xlsx`, `<year>/NN_<month-number>_water.xlsx`, and `<year>/NN_WM_<year>.xlsx` as fallbacks, outputs from `<year>/<Month>/output`, and policy from `skills.md` in the launch directory. Use the optional path arguments only when overriding these locations.
+
+Use `--config` to support another apartment without changing Python code. The config controls workbook sheet names, vendor charges, tank capacity, solar/common prefixes, faulty solar series, and output names. The default solar fill strategy remains controlled by the explicit `Default recommendation` in `skills.md`.
 
 Annual workbook convention: keep exactly one active workbook per year at `<year>/NN_WM_water.xlsx`. Each monthly run updates or adds that month's reading and cost columns in the annual workbook; it must not create a separate monthly meter workbook.
 
