@@ -65,6 +65,10 @@ policy:  skills.md in the launch directory
 
 The command updates the selected reading and cost columns, validates all meter identifiers and policy inputs, and creates Society-facing and NoBroker Hood Excel/PDF bills. Optional path arguments can override any default. If OCR cannot identify every reading, it stops before updating the workbook and writes an `*_input_review.json` report. Reviewed values can be supplied with `--readings-json`.
 
+## Demo month
+
+See [the August 2026 demo record](2026/August/README.md) for a real month folder containing input meter images, the annual workbook location, the command, and the generated Society-facing and NoBroker Hood outputs.
+
 ## Workspace layout
 
 There is **one meter workbook per year**. All monthly readings and cost values for a year remain in that annual workbook as month columns; monthly bills are generated separately under the month output folder.
