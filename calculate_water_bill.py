@@ -147,15 +147,15 @@ def normalize_series(series_values: str | list[str] | set[str]) -> set[str]:
     return normalized
 
 
-def split_rows(rows: list[MeterRow]) -> tuple[list[MeterRow], list[MeterRow], list[MeterRow]]:
+def split_rows(rows: list[MeterRow], solar_prefix: str = "SOLAR_", common_prefix: str = "Common_") -> tuple[list[MeterRow], list[MeterRow], list[MeterRow]]:
     flat_rows: list[MeterRow] = []
     solar_rows: list[MeterRow] = []
     common_rows: list[MeterRow] = []
 
     for row in rows:
-        if row.name.startswith("SOLAR_"):
+        if row.name.startswith(solar_prefix):
             solar_rows.append(row)
-        elif row.name.startswith("Common_"):
+        elif row.name.startswith(common_prefix):
             common_rows.append(row)
         else:
             flat_rows.append(row)
@@ -163,8 +163,8 @@ def split_rows(rows: list[MeterRow]) -> tuple[list[MeterRow], list[MeterRow], li
     return flat_rows, solar_rows, common_rows
 
 
-def solar_series(row: MeterRow) -> str:
-    return series_from_flat(row.name.replace("SOLAR_", ""))
+def solar_series(row: MeterRow, solar_prefix: str = "SOLAR_") -> str:
+    return series_from_flat(row.name.replace(solar_prefix, ""))
 
 
 def solar_consumption_by_series(
@@ -210,8 +210,10 @@ def build_records(
     tanker_cost: float,
     ignored_solar_series: set[str] | None = None,
     faulty_solar_fill_strategy: str = "no-correction",
+    solar_prefix: str = "SOLAR_",
+    common_prefix: str = "Common_",
 ) -> tuple[dict[str, float], list[dict[str, object]], list[dict[str, object]]]:
-    flat_rows, solar_rows, common_rows = split_rows(rows)
+    flat_rows, solar_rows, common_rows = split_rows(rows, solar_prefix, common_prefix)
     ignored_solar_series = ignored_solar_series or set()
     solar_by_series, solar_status_by_series, solar_fill_value = solar_consumption_by_series(
         solar_rows,
@@ -227,7 +229,7 @@ def build_records(
     ignored_solar_consumption = sum(
         row.consumption
         for row in solar_rows
-        if solar_series(row) in ignored_solar_series
+        if solar_series(row, solar_prefix) in ignored_solar_series
     )
     solar_consumption = sum(solar_by_series.values())
     common_consumption = sum(row.consumption for row in common_rows)
@@ -247,7 +249,7 @@ def build_records(
         flats_by_series[series_from_flat(row.name)].append(row.name)
 
     solar_name_by_series = {
-        solar_series(row): row.name for row in solar_rows
+        solar_series(row, solar_prefix): row.name for row in solar_rows
     }
 
     flat_records: list[dict[str, object]] = []

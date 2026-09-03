@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-folder", type=Path, help="Defaults to <year>/<Month>/output.")
     parser.add_argument("--skills-file", type=Path, help="Defaults to skills.md in the launch directory.")
     parser.add_argument("--month", required=True, help="Month to process, e.g. 'August 2026' or '2026-08'.")
+    parser.add_argument("--config", type=Path, help="Apartment configuration JSON; defaults to config/nn_water.json.")
     parser.add_argument("--readings-json", type=Path, help="Optional reviewed OCR mapping: {flat_identifier: reading}.")
     parser.add_argument("--faulty-solar-fill-strategy", choices=["no-correction", "mean", "median"])
     parser.add_argument("--kaveri-tanks", type=int)
@@ -85,6 +86,18 @@ def resolve_paths(args: argparse.Namespace, label: str) -> tuple[Path, Path, Pat
     return image_folder, input_xlsx, output_folder, skills_file
 
 
+def load_config(path: Path) -> dict[str, object]:
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DependencyError([f"valid configuration JSON: {path} ({exc})"]) from exc
+    required = ("workbook", "vendors", "solar", "common", "outputs")
+    missing = [key for key in required if key not in config]
+    if missing:
+        raise DependencyError([f"configuration keys: {', '.join(missing)}"])
+    return config
+
+
 def find_month_columns(ws, month: str) -> tuple[int, int, str]:
     label = month_name(month)
     month_word = label.split()[0].lower()
@@ -102,9 +115,12 @@ def read_policy(path: Path) -> dict[str, object]:
     text = path.read_text(encoding="utf-8")
     faulty_match = re.search(r"Known non-working/faulty solar series[^:]*:\s*([^\n]+)", text, re.I)
     faulty = set(normalize_series(re.findall(r"\d+", faulty_match.group(1)))) if faulty_match else set()
+    default_line = re.search(r"\*\*Default recommendation\*\*[^\n]*", text, re.I)
     strategy = "no-correction"
-    if re.search(r"default recommendation[^\n]*median correction", text, re.I):
-        strategy = "median"
+    if default_line:
+        strategy_match = re.search(r"\b(no correction|mean correction|median correction)\b", default_line.group(0), re.I)
+        if strategy_match:
+            strategy = {"no correction": "no-correction", "mean correction": "mean", "median correction": "median"}[strategy_match.group(1).lower()]
     kiran = re.search(r"KIRAN[^\n]*?(?:₹|Rs\.?\s*)?(\d+(?:\.\d+)?)", text, re.I)
     kaveri = re.search(r"KAVERI[^\n]*?(?:₹|Rs\.?\s*)?(\d+(?:\.\d+)?)", text, re.I)
     return {
@@ -226,11 +242,11 @@ def style_table(ws, header_row: int, columns: int) -> None:
     ws.freeze_panes = f"A{header_row + 1}"
 
 
-def update_cost_tab(path: Path, label: str, reading_column: int, kaveri_tanks: int, kiran_tanks: int, kaveri_rate: float, kiran_rate: float) -> None:
+def update_cost_tab(path: Path, label: str, reading_column: int, meter_sheet: str, cost_sheet: str, litres_per_tank: int, kaveri_tanks: int, kiran_tanks: int, kaveri_rate: float, kiran_rate: float) -> None:
     wb = openpyxl.load_workbook(path)
-    if "cost" not in wb.sheetnames:
-        raise DependencyError(["worksheet 'cost'"])
-    ws = wb["cost"]
+    if cost_sheet not in wb.sheetnames:
+        raise DependencyError([f"worksheet {cost_sheet!r}"])
+    ws = wb[cost_sheet]
     month_word = label.split()[0].lower()
     aliases = MONTH_ALIASES[month_word]
     cost_column = next((col for col in range(2, ws.max_column + 1) if any(alias in str(ws.cell(1, col).value).lower() for alias in aliases)), None)
@@ -238,8 +254,9 @@ def update_cost_tab(path: Path, label: str, reading_column: int, kaveri_tanks: i
         raise DependencyError([f"cost-tab column for {label}"])
     reading_letter = openpyxl.utils.get_column_letter(reading_column)
     cost_letter = openpyxl.utils.get_column_letter(cost_column)
-    ws.cell(2, cost_column).value = f"=SUM(water_meter_reading_quarter!{reading_letter}2:{reading_letter}140)"
-    ws.cell(3, cost_column).value = f"=({kaveri_tanks}*700)+({kiran_tanks}*700)"
+    last_row = wb[meter_sheet].max_row
+    ws.cell(2, cost_column).value = f"=SUM('{meter_sheet}'!{reading_letter}2:{reading_letter}{last_row})"
+    ws.cell(3, cost_column).value = f"=({kaveri_tanks}*{litres_per_tank})+({kiran_tanks}*{litres_per_tank})"
     ws.cell(4, cost_column).value = f"={cost_letter}2-{cost_letter}3"
     ws.cell(5, cost_column).value = f"=({kaveri_tanks}*{kaveri_rate})+({kiran_tanks}*{kiran_rate})"
     wb.calculation.fullCalcOnLoad = True
@@ -248,8 +265,8 @@ def update_cost_tab(path: Path, label: str, reading_column: int, kaveri_tanks: i
     wb.save(path)
 
 
-def create_bills(output: Path, label: str, rows: list[MeterRow], previous_consumption: dict[str, float], tanker_cost: float, tanker_litres: int, faulty: set[str], strategy: str) -> tuple[Path, Path, dict[str, object]]:
-    summary, records, _ = build_records(rows, tanker_cost, faulty, strategy)
+def create_bills(output: Path, label: str, rows: list[MeterRow], previous_consumption: dict[str, float], tanker_cost: float, tanker_litres: int, faulty: set[str], strategy: str, solar_prefix: str, common_prefix: str) -> tuple[Path, Path, dict[str, object]]:
+    summary, records, _ = build_records(rows, tanker_cost, faulty, strategy, solar_prefix, common_prefix)
     output.mkdir(parents=True, exist_ok=True)
     society_path = output / f"{label.replace(' ', '_')}_Final_Society_Bill.xlsx"
     nbh_path = output / f"{label.replace(' ', '_')}_Final_Society_Bill_NoBroker_Hood.xlsx"
@@ -316,13 +333,27 @@ def main() -> int:
     try:
         label = month_name(args.month)
         args.image_folder, args.input_xlsx, args.output_folder, args.skills_file = resolve_paths(args, label)
-        sheet = "water_meter_reading_quarter"
+        config_path = args.config or Path("config/nn_water.json")
+        config = load_config(config_path)
+        workbook_config = config["workbook"]
+        vendor_config = config["vendors"]
+        solar_config = config["solar"]
+        common_config = config["common"]
+        sheet = str(workbook_config["meter_sheet"])
+        cost_sheet = str(workbook_config["cost_sheet"])
         policy = read_policy(args.skills_file)
+        policy["faulty_series"] = set(normalize_series(solar_config["faulty_series"]))
+        kaveri = vendor_config["KAVERI"]
+        kiran = vendor_config["KIRAN"]
+        kaveri_rate = float(kaveri["rate_per_tank"])
+        kiran_rate = float(kiran["rate_per_tank"])
+        litres_per_tank = int(kaveri["litres_per_tank"])
         missing: list[str] = []
-        if policy["kaveri_rate"] is None: missing.append("KAVERI rate in skills.md")
-        if policy["kiran_rate"] is None: missing.append("KIRAN rate in skills.md")
+        if kaveri_rate <= 0: missing.append("positive KAVERI rate in config")
+        if kiran_rate <= 0: missing.append("positive KIRAN rate in config")
         wb = openpyxl.load_workbook(args.input_xlsx, data_only=False)
         if sheet not in wb.sheetnames: missing.append(f"worksheet {sheet!r}")
+        if cost_sheet not in wb.sheetnames: missing.append(f"worksheet {cost_sheet!r}")
         if missing: raise DependencyError(missing)
         previous_col, current_col, _ = find_month_columns(wb[sheet], label)
         identifiers = load_identifiers(args.input_xlsx, sheet)
@@ -339,17 +370,17 @@ def main() -> int:
         shutil.copy2(args.input_xlsx, args.input_xlsx.with_name(args.input_xlsx.stem + "_before_monthly_update.xlsx"))
         write_readings(args.input_xlsx, sheet, current_col, ocr_found)
         wb = openpyxl.load_workbook(args.input_xlsx, data_only=False)
-        cost_ws = wb["cost"] if "cost" in wb.sheetnames else None
+        cost_ws = wb[cost_sheet] if cost_sheet in wb.sheetnames else None
         formula = None
         if cost_ws:
             month_word = label.split()[0].lower()
             formula = next((cost_ws.cell(5, col).value for col in range(2, cost_ws.max_column + 1) if any(alias in str(cost_ws.cell(1, col).value).lower() for alias in MONTH_ALIASES[month_word])), None)
-        kaveri_tanks, kiran_tanks = parse_vendor_counts(formula, float(policy["kaveri_rate"]), float(policy["kiran_rate"]))
+        kaveri_tanks, kiran_tanks = parse_vendor_counts(formula, kaveri_rate, kiran_rate)
         kaveri_tanks = args.kaveri_tanks if args.kaveri_tanks is not None else kaveri_tanks
         kiran_tanks = args.kiran_tanks if args.kiran_tanks is not None else kiran_tanks
         if kaveri_tanks is None or kiran_tanks is None:
             raise DependencyError(["KAVERI/KIRAN tank counts in the cost formula or CLI arguments"])
-        tanker_cost = kaveri_tanks * float(policy["kaveri_rate"]) + kiran_tanks * float(policy["kiran_rate"])
+        tanker_cost = kaveri_tanks * kaveri_rate + kiran_tanks * kiran_rate
         strategy = args.faulty_solar_fill_strategy or str(policy["fill_strategy"])
         rows, issues = load_meter_rows(args.input_xlsx, sheet, previous_col, current_col)
         if issues: raise DependencyError(issues)
@@ -360,8 +391,8 @@ def main() -> int:
             if name is not None and not str(name).startswith(("SOLAR_", "Common_")):
                 previous_consumption[str(name)] = float(source_ws.cell(row_number, previous_col).value or 0) - float(source_ws.cell(row_number, previous_col - 1).value or 0)
         tanker_litres = (kaveri_tanks + kiran_tanks) * 700
-        update_cost_tab(args.input_xlsx, label, current_col, kaveri_tanks, kiran_tanks, float(policy["kaveri_rate"]), float(policy["kiran_rate"]))
-        society_path, nbh_path, summary = create_bills(args.output_folder, label, rows, previous_consumption, tanker_cost, tanker_litres, set(policy["faulty_series"]), strategy)
+        update_cost_tab(args.input_xlsx, label, current_col, sheet, cost_sheet, litres_per_tank, kaveri_tanks, kiran_tanks, kaveri_rate, kiran_rate)
+        society_path, nbh_path, summary = create_bills(args.output_folder, label, rows, previous_consumption, tanker_cost, tanker_litres, set(policy["faulty_series"]), strategy, str(solar_config["prefix"]), str(common_config["prefix"]))
         pdfs = [export_pdf(path, args.output_folder) for path in (society_path, nbh_path)] if args.pdf else []
         print(json.dumps({"society_bill": str(society_path), "nobroker_hood_bill": str(nbh_path), "pdfs": [str(p) for p in pdfs if p], "total_tanker_cost": tanker_cost, "summary": summary}, indent=2, default=str))
         return 0

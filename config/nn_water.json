@@ -1,0 +1,28 @@
+{
+  "workbook": {
+    "meter_sheet": "water_meter_reading_quarter",
+    "cost_sheet": "cost",
+    "identifier_column": "Flat No"
+  },
+  "vendors": {
+    "KAVERI": {
+      "rate_per_tank": 740,
+      "litres_per_tank": 700
+    },
+    "KIRAN": {
+      "rate_per_tank": 950,
+      "litres_per_tank": 700
+    }
+  },
+  "solar": {
+    "prefix": "SOLAR_",
+    "faulty_series": ["03", "06", "09", "10", "11", "14", "18", "22"]
+  },
+  "common": {
+    "prefix": "Common_"
+  },
+  "outputs": {
+    "society_bill_name": "Final_Society_Bill",
+    "nobroker_bill_name": "Final_Society_Bill_NoBroker_Hood"
+  }
+}
