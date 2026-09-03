@@ -171,7 +171,7 @@ Use this decision before calculating Strategy A or Strategy B.
 
 **Current known faulty solar series**: 03, 06, 09, 10, 11, 14, 18, 22
 
-**Default recommendation**: Use **no correction** unless MC approves an estimated fill value for the month. If estimation is approved, prefer **median correction** when there are large outliers.
+**Default recommendation**: Use **median correction** for the known faulty solar series. This is the society's established monthly billing strategy unless the MC explicitly changes the policy.
 
 ---
 
@@ -456,7 +456,7 @@ Known non-working solar series: **03, 06, 09, 10, 11, 14, 18, 22**
 - Good when working solar meters contain outliers
 - Usually the best estimation method if MC wants correction
 
-**Default recommendation**: Use **no correction** until MC formally approves estimation. If estimation is approved, use **median correction** unless working solar readings are very uniform.
+**Default recommendation**: Use **median correction** for the known faulty solar series unless the MC explicitly changes the policy.
 
 ### Question 3: Should We Reduce Solar Cost Share?
 
