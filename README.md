@@ -1,5 +1,51 @@
 # NN Water Billing
 
+## Environment setup
+
+Create an isolated Python environment once per machine:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+The `requirements.txt` file installs these Python dependencies:
+
+- `openpyxl`: read and update Excel workbooks.
+- `Pillow`: load and enhance meter images.
+- `pytesseract`: call Tesseract OCR from Python.
+
+The OCR workflow also requires the system `tesseract` executable. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install tesseract-ocr
+```
+
+For PDF generation, install LibreOffice as well. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install libreoffice
+```
+
+On Windows, create and activate the environment with:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Activate the environment before each monthly run. Leave it with:
+
+```bash
+deactivate
+```
+
+The virtual environment is recommended but not mandatory if these dependencies are already installed in the selected Python interpreter.
+
 ## Monthly automation
 
 Run from the workspace root:

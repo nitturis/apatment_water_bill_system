@@ -31,6 +31,8 @@ The script updates the selected month in the input workbook and creates:
 
 The superseded exploratory OCR scripts are stored under `archive/ocr_experiments/`; do not use them for a monthly run.
 
+Environment setup: use `python3 -m venv .venv`, activate it, and install `requirements.txt`. OCR also needs the system `tesseract` executable. A virtual environment is recommended for reproducibility, but the script can use any Python interpreter with the listed packages installed.
+
 ---
 
 ## 1. System Overview
