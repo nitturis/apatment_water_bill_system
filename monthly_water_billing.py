@@ -242,7 +242,7 @@ def style_table(ws, header_row: int, columns: int) -> None:
     ws.freeze_panes = f"A{header_row + 1}"
 
 
-def update_cost_tab(path: Path, label: str, reading_column: int, meter_sheet: str, cost_sheet: str, litres_per_tank: int, kaveri_tanks: int, kiran_tanks: int, kaveri_rate: float, kiran_rate: float) -> None:
+def update_cost_tab(path: Path, label: str, previous_column: int, reading_column: int, meter_sheet: str, cost_sheet: str, litres_per_tank: int, kaveri_tanks: int, kiran_tanks: int, kaveri_rate: float, kiran_rate: float) -> None:
     wb = openpyxl.load_workbook(path)
     if cost_sheet not in wb.sheetnames:
         raise DependencyError([f"worksheet {cost_sheet!r}"])
@@ -252,10 +252,11 @@ def update_cost_tab(path: Path, label: str, reading_column: int, meter_sheet: st
     cost_column = next((col for col in range(2, ws.max_column + 1) if any(alias in str(ws.cell(1, col).value).lower() for alias in aliases)), None)
     if cost_column is None:
         raise DependencyError([f"cost-tab column for {label}"])
+    previous_letter = openpyxl.utils.get_column_letter(previous_column)
     reading_letter = openpyxl.utils.get_column_letter(reading_column)
     cost_letter = openpyxl.utils.get_column_letter(cost_column)
     last_row = wb[meter_sheet].max_row
-    ws.cell(2, cost_column).value = f"=SUM('{meter_sheet}'!{reading_letter}2:{reading_letter}{last_row})"
+    ws.cell(2, cost_column).value = f"=SUM('{meter_sheet}'!{reading_letter}2:{reading_letter}{last_row})-SUM('{meter_sheet}'!{previous_letter}2:{previous_letter}{last_row})"
     ws.cell(3, cost_column).value = f"=({kaveri_tanks}*{litres_per_tank})+({kiran_tanks}*{litres_per_tank})"
     ws.cell(4, cost_column).value = f"={cost_letter}2-{cost_letter}3"
     ws.cell(5, cost_column).value = f"=({kaveri_tanks}*{kaveri_rate})+({kiran_tanks}*{kiran_rate})"
@@ -285,9 +286,17 @@ def create_bills(output: Path, label: str, rows: list[MeterRow], previous_consum
             headers += ["Last Month Consumption (x10 Litres)", "Change vs Last Month (x10 Litres)", "Change vs Last Month (%)", "Mean Consumption (x10 Litres)", "Consumption vs Mean (x10 Litres)"]
         ws.append(headers)
         style_table(ws, 6, len(headers))
-        for record in records:
+        raw_totals = [float(record["Total Solar Common"]) for record in records]
+        rounded_totals = [int(total + 0.5) for total in raw_totals]
+        shortfall = max(0, int(tanker_cost - sum(rounded_totals)))
+        for index in sorted(range(len(records)), key=lambda item: raw_totals[item] % 1, reverse=True)[:shortfall]:
+            rounded_totals[index] += 1
+
+        for record, rounded_total in zip(records, rounded_totals):
             name = str(record["Flat"])
-            row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], record["Individual Share"], record["Solar Share Common"] + record["Common Share"], record["Total Solar Common"]]
+            individual_cost = int(float(record["Individual Share"]) + 0.5)
+            common_cost = rounded_total - individual_cost
+            row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], individual_cost, common_cost, rounded_total]
             if include_analysis:
                 current_consumption = float(record["Consumption"])
                 last_month = previous_consumption[name]
@@ -391,7 +400,7 @@ def main() -> int:
             if name is not None and not str(name).startswith(("SOLAR_", "Common_")):
                 previous_consumption[str(name)] = float(source_ws.cell(row_number, previous_col).value or 0) - float(source_ws.cell(row_number, previous_col - 1).value or 0)
         tanker_litres = (kaveri_tanks + kiran_tanks) * 700
-        update_cost_tab(args.input_xlsx, label, current_col, sheet, cost_sheet, litres_per_tank, kaveri_tanks, kiran_tanks, kaveri_rate, kiran_rate)
+        update_cost_tab(args.input_xlsx, label, previous_col, current_col, sheet, cost_sheet, litres_per_tank, kaveri_tanks, kiran_tanks, kaveri_rate, kiran_rate)
         society_path, nbh_path, summary = create_bills(args.output_folder, label, rows, previous_consumption, tanker_cost, tanker_litres, set(policy["faulty_series"]), strategy, str(solar_config["prefix"]), str(common_config["prefix"]))
         pdfs = [export_pdf(path, args.output_folder) for path in (society_path, nbh_path)] if args.pdf else []
         print(json.dumps({"society_bill": str(society_path), "nobroker_hood_bill": str(nbh_path), "pdfs": [str(p) for p in pdfs if p], "total_tanker_cost": tanker_cost, "summary": summary}, indent=2, default=str))
