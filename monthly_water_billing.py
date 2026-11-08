@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 import openpyxl
@@ -266,45 +267,219 @@ def update_cost_tab(path: Path, label: str, previous_column: int, reading_column
     wb.save(path)
 
 
-def create_bills(output: Path, label: str, rows: list[MeterRow], previous_consumption: dict[str, float], tanker_cost: float, tanker_litres: int, faulty: set[str], strategy: str, solar_prefix: str, common_prefix: str) -> tuple[Path, Path, dict[str, object]]:
+def load_adjustments(path: Path, sheet_name: str, label: str) -> tuple[float, dict[str, float]]:
+    wb = openpyxl.load_workbook(path, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        return 0.0, {}
+    ws = wb[sheet_name]
+    common_adj = 0.0
+    member_balances: dict[str, float] = {}
+    month_key = label.strip().lower()
+
+    header_row = None
+    for r in range(1, ws.max_row + 1):
+        if str(ws.cell(r, 1).value or "").strip() == "Date" and str(ws.cell(r, 2).value or "").strip() == "Billing Month":
+            header_row = r
+            break
+
+    if header_row is None:
+        return 0.0, {}
+
+    for r in range(header_row + 1, ws.max_row + 1):
+        cell_date = ws.cell(r, 1).value
+        if cell_date is None or str(cell_date).strip().startswith(("3.", "4.")):
+            break
+        row_month = str(ws.cell(r, 2).value or "").strip().lower()
+        flat_val = str(ws.cell(r, 3).value or "").strip().upper()
+        adj_type = str(ws.cell(r, 4).value or "").strip().upper()
+        amt = ws.cell(r, 5).value
+        if amt is None or not isinstance(amt, (int, float)):
+            continue
+        amt = float(amt)
+
+        if flat_val in ("ALL", "COMMON"):
+            if row_month == month_key or month_key.split()[0] in row_month:
+                if "RECOVERY" in adj_type:
+                    common_adj += amt
+                elif "REBATE" in adj_type:
+                    common_adj -= amt
+        else:
+            if row_month == month_key and "OFFSET" in adj_type:
+                continue
+            member_balances[flat_val] = member_balances.get(flat_val, 0.0) + amt
+
+    active_credits = {k: round(v, 2) for k, v in member_balances.items() if v > 0.01}
+    return common_adj, active_credits
+
+
+def record_adjustments(path: Path, sheet_name: str, label: str, applied_credits: dict[str, float], remaining_balances: dict[str, float]) -> None:
+    if not applied_credits:
+        return
+    wb = openpyxl.load_workbook(path)
+    if sheet_name not in wb.sheetnames:
+        return
+    ws = wb[sheet_name]
+
+    for r in range(5, 8):
+        flat_val = str(ws.cell(r, 1).value or "").strip()
+        if flat_val in remaining_balances:
+            rem = remaining_balances[flat_val]
+            ws.cell(r, 5).value = rem
+            ws.cell(r, 6).value = "ACTIVE" if rem > 0.01 else "SETTLED"
+
+    header_row = None
+    for r in range(1, ws.max_row + 1):
+        if str(ws.cell(r, 1).value or "").strip() == "Date" and str(ws.cell(r, 2).value or "").strip() == "Billing Month":
+            header_row = r
+            break
+
+    if header_row:
+        for flat, applied in applied_credits.items():
+            if applied <= 0:
+                continue
+            rem = remaining_balances.get(flat, 0.0)
+            found_row = None
+            for r in range(header_row + 1, ws.max_row + 1):
+                m = str(ws.cell(r, 2).value or "").strip().lower()
+                f = str(ws.cell(r, 3).value or "").strip().upper()
+                t = str(ws.cell(r, 4).value or "").strip().upper()
+                if m == label.strip().lower() and f == flat.upper() and "OFFSET" in t:
+                    found_row = r
+                    break
+
+            today_str = date.today().isoformat()
+            if found_row:
+                ws.cell(found_row, 5).value = -applied
+                ws.cell(found_row, 6).value = rem
+                ws.cell(found_row, 7).value = "ACTIVE" if rem > 0.01 else "SETTLED"
+                ws.cell(found_row, 8).value = f"{label} water bill offset. Net payable = ₹0. Remaining credit = ₹{rem:,.2f}."
+            else:
+                new_row = [today_str, label, flat, "OFFSET", -applied, rem, "ACTIVE" if rem > 0.01 else "SETTLED", f"{label} water bill offset. Net payable = ₹0. Remaining credit = ₹{rem:,.2f}."]
+                ws.append(new_row)
+    wb.save(path)
+
+
+def create_bills(
+    output: Path,
+    label: str,
+    rows: list[MeterRow],
+    previous_consumption: dict[str, float],
+    tanker_cost: float,
+    tanker_litres: int,
+    faulty: set[str],
+    strategy: str,
+    solar_prefix: str,
+    common_prefix: str,
+    common_adjustment: float = 0.0,
+    member_credits: dict[str, float] | None = None,
+) -> tuple[Path, Path, dict[str, object], dict[str, float], dict[str, float]]:
+    member_credits = member_credits or {}
+    has_adjustments = bool(common_adjustment or member_credits)
     summary, records, _ = build_records(rows, tanker_cost, faulty, strategy, solar_prefix, common_prefix)
     output.mkdir(parents=True, exist_ok=True)
     society_path = output / f"{label.replace(' ', '_')}_Final_Society_Bill.xlsx"
     nbh_path = output / f"{label.replace(' ', '_')}_Final_Society_Bill_NoBroker_Hood.xlsx"
 
-    for path, include_analysis in ((society_path, True), (nbh_path, False)):
+    flat_count = len(records)
+    common_adj_per_flat = (common_adjustment / flat_count) if flat_count else 0.0
+    target_billing_total = tanker_cost + common_adjustment
+
+    raw_totals = []
+    for record in records:
+        indiv = float(record["Individual Share"])
+        base_comm = float(record["Solar Share Common"]) + float(record["Common Share"])
+        adj_comm = base_comm + common_adj_per_flat
+        raw_totals.append(indiv + adj_comm)
+
+    rounded_totals = [int(total + 0.5) for total in raw_totals]
+    rounding_adjustment = int(round(target_billing_total - sum(rounded_totals)))
+    if rounding_adjustment:
+        ordered_indices = sorted(
+            range(len(records)),
+            key=lambda item: raw_totals[item] % 1,
+            reverse=rounding_adjustment > 0,
+        )
+        adjustment = 1 if rounding_adjustment > 0 else -1
+        for index in ordered_indices[:abs(rounding_adjustment)]:
+            rounded_totals[index] += adjustment
+
+    applied_credits: dict[str, float] = {}
+    remaining_balances: dict[str, float] = {}
+
+    for path, is_society in ((society_path, True), (nbh_path, False)):
         wb = Workbook()
         ws = wb.active
         ws.title = f"{label} Bill"
         ws.append([f"{label} Water Bill"])
         ws.append([])
         ws.append(["Water tanker cost paid", tanker_cost])
-        ws.append(["Common cost per flat", summary["Solar as common per flat"] + summary["Common facility per flat"]])
+        if common_adjustment:
+            ws.append(["Common cost adjustment", common_adjustment])
+            ws.append(["Total society billing pool", target_billing_total])
+        ws.append(["Common cost per flat", summary["Solar as common per flat"] + summary["Common facility per flat"] + common_adj_per_flat])
         ws.append(["Total flats billed", summary["Flat count"]])
-        headers = ["Flat No", "Previous Reading", "Current Reading", "Consumption (x10 Litres)", "Individual Cost", "Common Cost", "Total Amount"]
-        if include_analysis:
-            headers += ["Last Month Consumption (x10 Litres)", "Change vs Last Month (x10 Litres)", "Change vs Last Month (%)", "Mean Consumption (x10 Litres)", "Consumption vs Mean (x10 Litres)"]
-        ws.append(headers)
-        style_table(ws, 6, len(headers))
-        raw_totals = [float(record["Total Solar Common"]) for record in records]
-        rounded_totals = [int(total + 0.5) for total in raw_totals]
-        shortfall = max(0, int(tanker_cost - sum(rounded_totals)))
-        for index in sorted(range(len(records)), key=lambda item: raw_totals[item] % 1, reverse=True)[:shortfall]:
-            rounded_totals[index] += 1
 
-        for record, rounded_total in zip(records, rounded_totals):
+        if is_society:
+            if has_adjustments:
+                headers = ["Flat No", "Previous Reading", "Current Reading", "Consumption (x10 Litres)", "Individual Cost", "Common Cost", "Gross Amount", "Adjustment", "Net Amount", "Carry Forward"]
+            else:
+                headers = ["Flat No", "Previous Reading", "Current Reading", "Consumption (x10 Litres)", "Individual Cost", "Common Cost", "Total Amount"]
+            headers += ["Last Month Consumption (x10 Litres)", "Change vs Last Month (x10 Litres)", "Change vs Last Month (%)", "Mean Consumption (x10 Litres)", "Consumption vs Mean (x10 Litres)"]
+        else:
+            if has_adjustments:
+                headers = ["Flat No", "Previous Reading", "Current Reading", "Consumption (x10 Litres)", "Individual Cost", "Common Cost", "Adjustment", "Total Amount"]
+            else:
+                headers = ["Flat No", "Previous Reading", "Current Reading", "Consumption (x10 Litres)", "Individual Cost", "Common Cost", "Total Amount"]
+
+        ws.append(headers)
+        header_row = 8 if common_adjustment else 6
+        style_table(ws, header_row, len(headers))
+
+        for index, record in enumerate(records):
             name = str(record["Flat"])
             individual_cost = int(float(record["Individual Share"]) + 0.5)
-            common_cost = rounded_total - individual_cost
-            row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], individual_cost, common_cost, rounded_total]
-            if include_analysis:
+            gross_total = rounded_totals[index]
+            common_cost = gross_total - individual_cost
+
+            avail_credit = member_credits.get(name, 0.0)
+            credit_applied = min(avail_credit, float(gross_total))
+            net_payable = int(gross_total - credit_applied)
+            carry_forward = int(avail_credit - credit_applied)
+
+            if avail_credit > 0:
+                applied_credits[name] = float(credit_applied)
+                remaining_balances[name] = float(carry_forward)
+
+            if is_society:
+                if has_adjustments:
+                    row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], individual_cost, common_cost, gross_total, -int(credit_applied) if credit_applied else 0, net_payable, carry_forward if avail_credit else 0]
+                else:
+                    row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], individual_cost, common_cost, gross_total]
                 current_consumption = float(record["Consumption"])
-                last_month = previous_consumption[name]
+                last_month = previous_consumption.get(name, 0.0)
                 row += [last_month, current_consumption - last_month, (current_consumption - last_month) / last_month if last_month else "", summary["Individual consumption"] / summary["Flat count"], current_consumption - summary["Individual consumption"] / summary["Flat count"]]
+            else:
+                if has_adjustments:
+                    row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], individual_cost, common_cost, -int(credit_applied) if credit_applied else 0, net_payable]
+                else:
+                    row = [name, record["Previous Reading"], record["Current Reading"], record["Consumption"], individual_cost, common_cost, gross_total]
             ws.append(row)
-        ws.append(["Total", None, None, f"=SUM(D7:D{6 + len(records)})", f"=SUM(E7:E{6 + len(records)})", f"=SUM(F7:F{6 + len(records)})", f"=SUM(G7:G{6 + len(records)})"])
+
+        first_data = header_row + 1
+        last_data = header_row + len(records)
+        if is_society:
+            if has_adjustments:
+                ws.append(["Total", None, None, f"=SUM(D{first_data}:D{last_data})", f"=SUM(E{first_data}:E{last_data})", f"=SUM(F{first_data}:F{last_data})", f"=SUM(G{first_data}:G{last_data})", f"=SUM(H{first_data}:H{last_data})", f"=SUM(I{first_data}:I{last_data})", f"=SUM(J{first_data}:J{last_data})"])
+            else:
+                ws.append(["Total", None, None, f"=SUM(D{first_data}:D{last_data})", f"=SUM(E{first_data}:E{last_data})", f"=SUM(F{first_data}:F{last_data})", f"=SUM(G{first_data}:G{last_data})"])
+        else:
+            if has_adjustments:
+                ws.append(["Total", None, None, f"=SUM(D{first_data}:D{last_data})", f"=SUM(E{first_data}:E{last_data})", f"=SUM(F{first_data}:F{last_data})", f"=SUM(G{first_data}:G{last_data})", f"=SUM(H{first_data}:H{last_data})"])
+            else:
+                ws.append(["Total", None, None, f"=SUM(D{first_data}:D{last_data})", f"=SUM(E{first_data}:E{last_data})", f"=SUM(F{first_data}:F{last_data})", f"=SUM(G{first_data}:G{last_data})"])
+
         for col in range(1, len(headers) + 1):
-            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 22
+            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 20
         ws.sheet_properties.pageSetUpPr.fitToPage = True
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 0
@@ -316,6 +491,10 @@ def create_bills(output: Path, label: str, rows: list[MeterRow], previous_consum
     ws.title = "Summary"
     ws.append(["Metric", "Value"])
     for key, value in summary.items(): ws.append([key, value])
+    if common_adjustment:
+        ws.append(["Common cost adjustment", common_adjustment])
+        ws.append(["Adjusted billing target", target_billing_total])
+        ws.append(["Adjusted common cost per flat", summary["Solar as common per flat"] + summary["Common facility per flat"] + common_adj_per_flat])
     ws.append([])
     ws.append([f"{label} Water Source Summary", None])
     ws.append(["Source", "Quantity (litres)"])
@@ -325,9 +504,9 @@ def create_bills(output: Path, label: str, rows: list[MeterRow], previous_consum
     ws.append(["Borewell water", borewell_litres])
     ws.append(["Total water consumption", raw_total * 10])
     style_table(ws, 1, 2)
-    style_table(ws, len(summary) + 4, 2)
+    style_table(ws, len(summary) + (7 if common_adjustment else 4), 2)
     wb.save(summary_path)
-    return society_path, nbh_path, summary
+    return society_path, nbh_path, summary, applied_credits, remaining_balances
 
 
 def export_pdf(workbook_path: Path, output_folder: Path) -> Path | None:
@@ -368,7 +547,7 @@ def main() -> int:
         identifiers = load_identifiers(args.input_xlsx, sheet)
         ocr_found, review = ocr_readings(args.image_folder, identifiers)
         if args.readings_json:
-            ocr_found.update({str(k): int(v) for k, v in json.loads(args.readings_json.read_text()).items()})
+            ocr_found.update({str(k): int(v) for k, v in json.loads(args.readings_json.read_text()).items() if v is not None})
         expected = set(identifiers)
         missing_readings = sorted(expected - set(ocr_found))
         if missing_readings:
@@ -399,9 +578,13 @@ def main() -> int:
             name = source_ws.cell(row_number, 1).value
             if name is not None and not str(name).startswith(("SOLAR_", "Common_")):
                 previous_consumption[str(name)] = float(source_ws.cell(row_number, previous_col).value or 0) - float(source_ws.cell(row_number, previous_col - 1).value or 0)
+        adjustments_sheet = str(workbook_config.get("adjustments_sheet", "adjustments"))
+        common_adj, member_credits = load_adjustments(args.input_xlsx, adjustments_sheet, label)
         tanker_litres = (kaveri_tanks + kiran_tanks) * 700
         update_cost_tab(args.input_xlsx, label, previous_col, current_col, sheet, cost_sheet, litres_per_tank, kaveri_tanks, kiran_tanks, kaveri_rate, kiran_rate)
-        society_path, nbh_path, summary = create_bills(args.output_folder, label, rows, previous_consumption, tanker_cost, tanker_litres, set(policy["faulty_series"]), strategy, str(solar_config["prefix"]), str(common_config["prefix"]))
+        society_path, nbh_path, summary, applied_credits, remaining_balances = create_bills(args.output_folder, label, rows, previous_consumption, tanker_cost, tanker_litres, set(policy["faulty_series"]), strategy, str(solar_config["prefix"]), str(common_config["prefix"]), common_adj, member_credits)
+        if applied_credits:
+            record_adjustments(args.input_xlsx, adjustments_sheet, label, applied_credits, remaining_balances)
         pdfs = [export_pdf(path, args.output_folder) for path in (society_path, nbh_path)] if args.pdf else []
         print(json.dumps({"society_bill": str(society_path), "nobroker_hood_bill": str(nbh_path), "pdfs": [str(p) for p in pdfs if p], "total_tanker_cost": tanker_cost, "summary": summary}, indent=2, default=str))
         return 0

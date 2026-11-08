@@ -110,6 +110,22 @@ Environment setup: use `python3 -m venv .venv`, activate it, and install `requir
 | STP Plant Cost | If applicable | 0 |
 | **Total Water Cost** | **Sum of all sources** | **27,000** |
 
+### Tab 3: Adjustments & Carry-Forward Ledger (`adjustments`)
+**Updated**: As adjustments occur and automatically drawn down during each monthly billing run.
+
+Tracks all member-specific credits/debits, society-wide common recoveries/rebates, and multi-month carry-forward balances across any month or year:
+
+| Column | Description | Example |
+|--------|-------------|---------|
+| **Date** | Date of transaction entry | `2026-11-07` |
+| **Billing Month** | Target month for adjustment | `October 2026` |
+| **Flat No** | Flat identifier or `ALL` for society-wide items | `413` or `ALL` |
+| **Transaction Type** | `CREDIT`, `DEBIT`, `COMMON_RECOVERY`, `COMMON_REBATE`, `OFFSET` | `CREDIT` |
+| **Amount (₹)** | Transaction amount (+ for credit/recovery, - for offset) | `+2,889.00` |
+| **Running Balance (₹)** | Remaining unabsorbed balance for that flat | `2,473.00` |
+| **Status** | `ACTIVE` (carries forward) or `SETTLED` (balance = 0) | `ACTIVE` |
+| **Description** | Human-readable audit explanation | `Sep reading 8180 -> 5180 correction` |
+
 ---
 
 ## 3. Monthly Billing Workflow
@@ -209,8 +225,31 @@ Common Share per Flat (₹) = (Total Common Consumption m³ / 113 flats)
 
 #### E. Total Bill per Flat
 ```
-Total Bill = Individual Share + Solar Share + Common Share
+Gross Bill = Individual Share + Solar Share + Common Share
 ```
+
+#### F. Adjustments & Carry-Forward Calculation (Multi-Month Scalable)
+
+When society-wide or member-specific adjustments exist in the `adjustments` tab:
+
+1. **Society-Wide Common Adjustment**:
+```
+Adjusted Common Share (₹) = Base Common Share + (Common Recovery Amount / 113 flats)
+```
+*(Added equally to all 113 flats so the society recovers the required funds).*
+
+2. **Member Credit Offset & Carry-Forward Drawdown**:
+```
+Available Credit = Sum of prior CREDIT transactions - Sum of prior OFFSET transactions
+
+Credit Applied (₹) = MIN(Available Credit, Gross Bill)
+
+Net Bill Payable (₹) = Gross Bill - Credit Applied
+
+Closing Carry-Forward (₹) = Available Credit - Credit Applied
+```
+
+* **NoBroker Hood Rule**: A resident's `Net Bill Payable` is capped at **₹0** (no negative bills). Any unabsorbed balance automatically rolls over as `Closing Carry-Forward` to offset subsequent months until the balance reaches ₹0 (`SETTLED`).
 
 ---
 
@@ -372,8 +411,9 @@ When sharing the final monthly bill to NoBroker Hood, remove analysis/comparison
 | Current Reading | Current meter reading |
 | Consumption (x10 Litres) | Billable consumption |
 | Individual Cost | Consumption-based cost |
-| Common Cost | Equal common share |
-| Total Amount | Amount to collect |
+| Common Cost | Equal common share (including common recovery if applicable) |
+| Adjustment | Credit/debit offset applied (shown when adjustments exist) |
+| Total Amount | Net amount to collect (capped at ₹0 for credit balances) |
 
 ### Columns to Remove
 

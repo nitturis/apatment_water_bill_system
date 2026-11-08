@@ -2,6 +2,7 @@
   "workbook": {
     "meter_sheet": "water_meter_reading_quarter",
     "cost_sheet": "cost",
+    "adjustments_sheet": "adjustments",
     "identifier_column": "Flat No"
   },
   "vendors": {
