@@ -19,6 +19,7 @@ Annual workbook convention: keep exactly one active workbook per year at `<year>
 The automation must stop and report missing dependencies before creating bills. Required dependencies are:
 - A meter-reading worksheet with a previous and current month column.
 - A `cost` worksheet with the same month column, tanker quantities or vendor counts, and source cost rows.
+- An `adjustments` worksheet (configured via `"adjustments_sheet"` in `config/nn_water.json`, default: `"adjustments"`) for tracking member-specific credits/debits, society-wide common cost recoveries or rebates, and running carry-forward balances across months.
 - Readings for every identifier in the meter worksheet. OCR uncertainty must be reviewed using the generated `*_input_review.json` report or supplied through `--readings-json`.
 - Vendor rates and the faulty-solar policy in this file.
 
@@ -28,9 +29,10 @@ Current vendor policy:
 - **Borewell litres:** total meter consumption minus tanker litres; borewell cost is ₹0 unless the MC adds a cost policy.
 
 The script updates the selected month in the input workbook and creates:
-- `<Month>_<Year>_Final_Society_Bill.xlsx` and PDF.
-- `<Month>_<Year>_Final_Society_Bill_NoBroker_Hood.xlsx` and PDF.
+- `<Month>_<Year>_Final_Society_Bill.xlsx` and PDF (includes Gross Amount, Adjustment, Net Amount, and Carry Forward Balance).
+- `<Month>_<Year>_Final_Society_Bill_NoBroker_Hood.xlsx` and PDF (clean resident statement showing billable consumption, Individual Cost, Common Cost, Adjustment, and Net Amount).
 - `<Month>_<Year>_input_review.json` when OCR readings need review.
+- Automatic updates to the `adjustments` worksheet in `<year>/NN_WM_water.xlsx` recording monthly offset transactions and maintaining active running balances.
 
 The superseded exploratory OCR scripts are stored under `archive/ocr_experiments/`; do not use them for a monthly run.
 
@@ -141,15 +143,24 @@ Tracks all member-specific credits/debits, society-wide common recoveries/rebate
 
 ### Phase 1: Data Collection & Validation (Days 1-5 of month)
 - [ ] Collect meter readings from all 5 floors (verify flat count matches structure)
-- [ ] Verify readings are not decreasing (catch meter faults)
-- [ ] Record tanker vendor invoices
-- [ ] Input all data into NN_WM_2026.xlsx
+- [ ] Verify readings are not decreasing (catch meter faults, OCR digit drops)
+- [ ] Record tanker vendor invoices (Kaveri, Kiran counts and amounts)
+- [ ] Input all data into `NN_WM_water.xlsx`
+- [ ] **Review Adjustments Ledger (`adjustments` tab)**:
+  - Check Section 1 (Active Member Balances) for unabsorbed credits carrying forward from prior months
+  - Verify or record any new Section 2 transactions (e.g., resident overcharge credits, past month corrections, society-wide `COMMON_RECOVERY` or `COMMON_REBATE` amounts) targeted for this billing cycle
 
 ### Phase 2: Issue Identification & Root Cause Analysis (Days 5-10)
 - [ ] **Review Consumption Trends**: 
   - Compare month-on-month consumption per flat
   - Flag flats with >20% variance
   - Identify meter reading anomalies
+  
+- [ ] **Screen for OCR & Transcription Anomalies**:
+  - **Digit Substitutions**: Check for common OCR confusions such as `8` vs `5` (e.g. Flat 413 read as `8180` instead of `5180`) or `8` vs `3` (e.g. `SOLAR_G08` read as `4372` instead of `4872`)
+  - **Extra / Missing Digits**: Check for 4 digits where 3 digits are expected (e.g. Flat 301 read as `5337` instead of `537`)
+  - **Negative Consumption**: Any negative consumption indicates a transcription typo, rollover, or meter replacement
+  - **Compensating 2-Month Swings**: Check if a large spike in month `N` is followed by a sudden drop in month `N+1` (e.g. Flat 405); verify whether month `N` was over-read
   
 - [ ] **Check for Meter Issues**:
   - Non-functioning meters (reading unchanged)
@@ -352,49 +363,75 @@ For each month, record the selected fill strategy in the output workbook:
 - **Mean correction**: faulty series solar consumption = mean of working solar series consumption
 - **Median correction**: faulty series solar consumption = median of working solar series consumption
 
-### D. Creating the Trend Report
+### D. OCR & Transcription Anomaly Detection (Outlier Playbook)
+
+During each monthly billing run, compare current readings against previous month readings and historical medians. Actively screen for the following proven failure patterns:
+
+| Failure Pattern | Real-World Example | Detection Rule | Immediate Action |
+|-----------------|--------------------|----------------|------------------|
+| **Digit Substitution (8 vs 5)** | Flat 413: Sep reading read as `8180` instead of `5180` | Consumption >3x historical median or >1,000 units. Check leading/second digit for OCR loop confusion (`5` ↔ `8`, `1` ↔ `7`, `0` ↔ `6`). | Inspect raw handwritten photo. If already billed in a past month, use Section 10 Scenario 6 (adjustments ledger). |
+| **Extra / Repeated Digits** | Flat 301: Oct reading read as `5337` instead of `537` | Reading has 4 digits when meter has 3 digits, or sudden order-of-magnitude jump (>4,000 unit spike). | Re-check handwritten sheet. Remove duplicate digit in `NN_WM_water.xlsx` or pass `--readings-json`. |
+| **Negative Consumption (3 vs 8)** | SOLAR_G08: Oct reading read as `4372` vs Sep `4378` (-6 units) | Current reading < Previous reading (`Current - Previous < 0`). Check if `3` was confused with `8` (actual: `4872`, +494 units). | Never allow negative consumption into billing. Verify meter replacement vs OCR misread. |
+| **Meter Replacement / Zero Reset** | Flat 113: Sep reading was `12`, Oct reading `938` (+926 units) | Abnormally large jump following a near-zero reading. | Confirm with property manager if meter was replaced or flat became newly occupied. |
+| **Compensating 2-Month Swings** | Flat 405: Sep 2,026 units → Oct 488 units (2-mo avg: 1,257) | Large spike in month `N` followed by sharp drop in month `N+1`, while 2-month cumulative total matches historical average. | Total water volume is self-corrected by month `N+1`. Check if resident raised a dispute for month `N`. |
+
+### E. Creating the Trend Report
 
 Include in each month's billing file:
 - Comparison with same month last year
 - Series-wise trend chart
 - Top 5 highest consumers
 - Top 5 unusual spikes/drops
+- Adjustments summary (credits applied, carry-forward balances)
 - Recommendations for next month
 
 ---
 
 ## 7. Monthly Execution Checklist
 
-### Week 1: Data Entry
-- [ ] All 23 towers meter readings collected
-- [ ] Cost invoices compiled (tanker vendors)
-- [ ] Data entered in NN_WM_2026.xlsx
-- [ ] Previous month readings verified
-- [ ] No negative consumptions (validation check)
+### Week 1: Data Entry & Adjustments Setup
+- [ ] All 113 flats and 3 common facility meters collected across 5 floors
+- [ ] Cost invoices compiled (tanker vendor counts and total expenditure)
+- [ ] Data entered into annual workbook (`NN_WM_water.xlsx`)
+- [ ] Previous month readings verified against prior billing cycle
+- [ ] **Validation Check**: Ensure no negative consumptions ($Current \ge Previous$)
+- [ ] **Inspect Adjustments Ledger (`adjustments` tab)**:
+  - Check Section 1 for carry-forward credit balances from previous months
+  - Log any new member credits/debits or society-wide `COMMON_RECOVERY` / `COMMON_REBATE` entries in Section 2
 
-### Week 2: Analysis & Problem Identification
+### Week 2: Analysis & Outlier Screening
 - [ ] Calculate consumption per flat
-- [ ] Identify meter issues (see Section 6)
-- [ ] Analyze solar meter efficiency
-- [ ] Confirm non-working solar series list and selected fill strategy
-- [ ] Create trend report
-- [ ] Document unusual readings
+- [ ] **Outlier Screening** (see Section 6.D):
+  - Check for digit substitution errors (`8` ↔ `5`, `3` ↔ `8`)
+  - Check for extra or missing digits (e.g. 4-digit reading on a 3-digit meter)
+  - Verify compensating 2-month swings against historical flat averages
+- [ ] Analyze solar meter efficiency and verify working vs non-working series
+- [ ] Confirm known non-working solar series list (03, 06, 09, 10, 11, 14, 18, 22) and median fill strategy
+- [ ] Document unusual readings in `*_input_review.json` or workbook notes
 
-### Week 3: Strategy Development
-- [ ] Decide between Strategy A vs B
-- [ ] Document reasoning in Variance Analysis tab
-- [ ] Calculate final rates
-- [ ] Create both output Excel files
-- [ ] Verify totals match (cost recovery = 100%)
+### Week 3: Billing Execution & Ledger Reconciliation
+- [ ] Run automated monthly billing:
+  ```bash
+  python3 monthly_water_billing.py --month "<Month> <Year>"
+  ```
+- [ ] Verify rate calculation: Total Cost = Tankers + Borewell
+- [ ] Verify Common Share calculation: Base Common Share + (Common Recovery / 113)
+- [ ] **Verify Adjustments Application**:
+  - Member credits correctly offset gross bills
+  - NoBroker Hood rule enforced: `Net Payable` $\ge 0$ (no negative bills)
+  - Closing carry-forward balance accurately computed for remaining credits
+  - Automatic `OFFSET` transaction recorded in `adjustments` Section 2
+  - Active balances updated in `adjustments` Section 1
+- [ ] Verify total cost recovery and financial balancing
 
 ### Week 4: Distribution & Communication
-- [ ] Generate flat-wise bills (Strategy A)
-- [ ] Generate flat-wise bills (Strategy B)
-- [ ] Present both strategies to MC members for feedback
-- [ ] Choose primary strategy for this month
-- [ ] Create NoBroker Hood sharing PDF with comparison columns removed
-- [ ] Share bills with affected residents
-- [ ] Archive both files for records
+- [ ] Generate `<Month>_<Year>_Final_Society_Bill.xlsx` and PDF (detailed master bill)
+- [ ] Generate `<Month>_<Year>_Final_Society_Bill_NoBroker_Hood.xlsx` and PDF (clean resident bill)
+- [ ] Verify NoBroker Hood PDF contains no internal comparison wording (`pdftotext` validation)
+- [ ] Verify `Adjustment` and `Total Amount` columns are formatted properly
+- [ ] For flats with active carry-forward balances, verify resident statement displays ₹0 payable with unabsorbed balance noted
+- [ ] Upload approved bills to NoBroker Hood portal
+- [ ] Archive all files in `<year>/<Month>/output/` and commit/push changes to git repository
 
 ---
 
@@ -556,6 +593,45 @@ If < 3% → Reduce solar cost allocation to that % instead of flat share
 4. Recalculate: Sum of (Average per Flat × Flats in Series) should equal each tower's total
 5. If still discrepancy: Tower has incomplete data (missing meters from some flats)
 
+### Scenario 6: Resident Overbilling in Past Settled Month & Next-Month Offsets
+
+**Context**: A resident (e.g. Flat 413) discovers that a past month's reading was misread (e.g. September reading recorded as 8,180 instead of 5,180), resulting in an overcharge (e.g. billed ₹3,428 instead of ₹539, an excess of ₹2,889). The past month's bill was already circulated, collected, and paid by all residents.
+
+**Policy & Decision Rules**:
+1. **Never Modify or Re-issue Past Settled Bills**:
+   - Re-issuing past bills creates severe accounting discrepancies, breaks historical cash records, and confuses residents who already paid.
+   - The archived monthly bills (`<year>/<Month>/output/`) must always match what was actually issued and collected.
+2. **Recover the Discrepancy via Common Cost**:
+   - Because the past month's total tanker cost was recovered across all members, the resident's excess payment artificially reduced the common burden or offset other costs for that month.
+   - Recover the exact excess amount (e.g. ₹2,889.00) in the current month across all 113 flats:
+     $$\text{Common Recovery per Flat} = \frac{\text{₹}2,889.00}{113 \text{ flats}} = +\text{₹}25.57 \text{ per flat}$$
+   - Add this recovery to the current month's Base Common Cost so the society collects the required refund reserve.
+3. **Log Entries in `NN_WM_water.xlsx` (`adjustments` tab)**:
+   - Add a `COMMON_RECOVERY` row in Section 2 targeting the current billing month:
+     - `Date`: Entry date (e.g. `2026-11-07`)
+     - `Billing Month`: Current month (e.g. `October 2026`)
+     - `Flat No`: `ALL`
+     - `Transaction Type`: `COMMON_RECOVERY`
+     - `Amount`: `+2889.00`
+     - `Description`: `Society recovery for Flat 413 Sep overcharge`
+   - Add a `CREDIT` row in Section 2 for the affected resident:
+     - `Billing Month`: Current month (e.g. `October 2026`)
+     - `Flat No`: `413`
+     - `Transaction Type`: `CREDIT`
+     - `Amount`: `+2889.00`
+     - `Description`: `Sep overcharge credit (reading 8180 -> 5180)`
+   - Add or update the resident in Section 1 (Active Member Balances) with initial balance `2889.00` and status `ACTIVE`.
+4. **Automated Monthly Billing Drawdown**:
+   - When running `monthly_water_billing.py`, the engine automatically:
+     - Calculates the flat's Gross Bill (e.g. ₹416.00).
+     - Applies allowable credit: `Credit Applied = MIN(Available Credit, Gross Bill)` (e.g. `MIN(₹2,889, ₹416) = ₹416.00`).
+     - Caps `Net Bill Payable` at **₹0** (ensuring compatibility with NoBroker Hood).
+     - Calculates closing balance: `Closing Carry Forward = Available Credit - Credit Applied` (e.g. `₹2,889 - ₹416 = ₹2,473.00`).
+     - Automatically logs an `OFFSET` transaction (`-₹416.00`) in Section 2 and updates the active balance in Section 1 to `₹2,473.00`.
+5. **Multi-Month Carry-Forward Scalability**:
+   - In subsequent months (e.g. November, December), no manual intervention is needed.
+   - The engine automatically reads the active balance from Section 1, applies the credit against each month's gross bill, and decrements the balance until it reaches ₹0, at which point the status updates to `SETTLED`.
+
 ---
 
 ## 11. Excel File Template Structure
@@ -655,14 +731,26 @@ Solar Share per Flat - B (₹) = (Series Solar m³ / Flats in Series) × (Solar 
 
 Common Share per Flat (₹) = (Common Consumption m³ / 113 flats) × (Common % of Total Cost)
 
-Total Bill per Flat = Individual Share + Solar Share + Common Share
+Gross Bill per Flat (₹) = Individual Share + Solar Share + Common Share
 
-Cost Recovery Check = Sum of All Bills / Total Cost (Should = 1.00 or 100%)
+Adjusted Common Share (₹) = Base Common Share + (Common Recovery Amount / 113 flats) - (Common Rebate Amount / 113 flats)
+
+Available Member Credit (₹) = Cumulative Member Credits - Cumulative Prior Offsets
+
+Credit Applied (₹) = MIN(Available Member Credit, Gross Bill)
+
+Net Bill Payable (₹) = MAX(0, Gross Bill - Credit Applied)
+
+Closing Carry-Forward Balance (₹) = Available Member Credit - Credit Applied
+
+Total Society Billed Pool (₹) = Total Water Cost + Common Recovery Amount - Common Rebate Amount
+
+Cost Recovery Check = Sum of All Net Bills + Sum of Credits Applied / Total Society Billed Pool (Should = 1.00 or 100%)
 ```
 
 ---
 
-**Document Version**: 1.1  
-**Last Updated**: August 2026  
+**Document Version**: 1.2  
+**Last Updated**: November 2026  
 **Maintained By**: Navya Nisarga MC Water Bill Committee  
 **Review Frequency**: Quarterly (or as needed)
