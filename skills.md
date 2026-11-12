@@ -249,7 +249,7 @@ Adjusted Common Share (₹) = Base Common Share + (Common Recovery Amount / 113 
 ```
 *(Added equally to all 113 flats so the society recovers the required funds).*
 
-2. **Member Credit Offset & Carry-Forward Drawdown**:
+2. **Member Credit Offset & Carry-Forward Drawdown (Overpayments / Refunds)**:
 ```
 Available Credit = Sum of prior CREDIT transactions - Sum of prior OFFSET transactions
 
@@ -261,6 +261,17 @@ Closing Carry-Forward (₹) = Available Credit - Credit Applied
 ```
 
 * **NoBroker Hood Rule**: A resident's `Net Bill Payable` is capped at **₹0** (no negative bills). Any unabsorbed balance automatically rolls over as `Closing Carry-Forward` to offset subsequent months until the balance reaches ₹0 (`SETTLED`).
+
+3. **Member Arrears / Unpaid Past Bills (Debits Added to Current Bill)**:
+When a member did not pay a previous month's bill (e.g. withheld payment due to a reading error), the unpaid past month amount is billed as a positive adjustment:
+```
+Arrears Added (₹) = Past Month Unpaid Bill Amount
+
+Net Bill Payable (₹) = Gross Bill + Arrears Added
+
+Closing Carry-Forward (₹) = 0 (Starts fresh; all dues cleared in current billing)
+```
+In both the master Society bill and the resident NoBroker Hood bill, the `Adjustment` column displays `+Arrears Added` (or `-Credit Applied`), and `Net Amount` / `Total Amount` displays `Gross Bill + Adjustment`.
 
 ---
 
@@ -593,44 +604,40 @@ If < 3% → Reduce solar cost allocation to that % instead of flat share
 4. Recalculate: Sum of (Average per Flat × Flats in Series) should equal each tower's total
 5. If still discrepancy: Tower has incomplete data (missing meters from some flats)
 
-### Scenario 6: Resident Overbilling in Past Settled Month & Next-Month Offsets
+### Scenario 6: Resident Overbilling in Past Settled Month (Arrears vs Credit Carry-Forward)
 
-**Context**: A resident (e.g. Flat 413) discovers that a past month's reading was misread (e.g. September reading recorded as 8,180 instead of 5,180), resulting in an overcharge (e.g. billed ₹3,428 instead of ₹539, an excess of ₹2,889). The past month's bill was already circulated, collected, and paid by all residents.
+**Context**: A resident (e.g. Flat 413) discovers that a past month's reading was misread (e.g. September reading recorded as `8180` instead of `5180`), resulting in an erroneous bill (e.g. billed ₹3,428 instead of their true bill of ₹539, a ₹2,889 difference). The past month's bill was already circulated and other residents paid their shares.
 
-**Policy & Decision Rules**:
-1. **Never Modify or Re-issue Past Settled Bills**:
-   - Re-issuing past bills creates severe accounting discrepancies, breaks historical cash records, and confuses residents who already paid.
-   - The archived monthly bills (`<year>/<Month>/output/`) must always match what was actually issued and collected.
-2. **Recover the Discrepancy via Common Cost**:
-   - Because the past month's total tanker cost was recovered across all members, the resident's excess payment artificially reduced the common burden or offset other costs for that month.
-   - Recover the exact excess amount (e.g. ₹2,889.00) in the current month across all 113 flats:
-     $$\text{Common Recovery per Flat} = \frac{\text{₹}2,889.00}{113 \text{ flats}} = +\text{₹}25.57 \text{ per flat}$$
-   - Add this recovery to the current month's Base Common Cost so the society collects the required refund reserve.
-3. **Log Entries in `NN_WM_water.xlsx` (`adjustments` tab)**:
-   - Add a `COMMON_RECOVERY` row in Section 2 targeting the current billing month:
-     - `Date`: Entry date (e.g. `2026-11-07`)
-     - `Billing Month`: Current month (e.g. `October 2026`)
-     - `Flat No`: `ALL`
-     - `Transaction Type`: `COMMON_RECOVERY`
-     - `Amount`: `+2889.00`
-     - `Description`: `Society recovery for Flat 413 Sep overcharge`
-   - Add a `CREDIT` row in Section 2 for the affected resident:
-     - `Billing Month`: Current month (e.g. `October 2026`)
-     - `Flat No`: `413`
-     - `Transaction Type`: `CREDIT`
-     - `Amount`: `+2889.00`
-     - `Description`: `Sep overcharge credit (reading 8180 -> 5180)`
-   - Add or update the resident in Section 1 (Active Member Balances) with initial balance `2889.00` and status `ACTIVE`.
-4. **Automated Monthly Billing Drawdown**:
-   - When running `monthly_water_billing.py`, the engine automatically:
-     - Calculates the flat's Gross Bill (e.g. ₹416.00).
-     - Applies allowable credit: `Credit Applied = MIN(Available Credit, Gross Bill)` (e.g. `MIN(₹2,889, ₹416) = ₹416.00`).
-     - Caps `Net Bill Payable` at **₹0** (ensuring compatibility with NoBroker Hood).
-     - Calculates closing balance: `Closing Carry Forward = Available Credit - Credit Applied` (e.g. `₹2,889 - ₹416 = ₹2,473.00`).
-     - Automatically logs an `OFFSET` transaction (`-₹416.00`) in Section 2 and updates the active balance in Section 1 to `₹2,473.00`.
-5. **Multi-Month Carry-Forward Scalability**:
-   - In subsequent months (e.g. November, December), no manual intervention is needed.
-   - The engine automatically reads the active balance from Section 1, applies the credit against each month's gross bill, and decrements the balance until it reaches ₹0, at which point the status updates to `SETTLED`.
+**Core Rule**: **Never Modify or Re-issue Past Settled Bills**:
+- Re-issuing past bills creates severe accounting discrepancies, breaks historical cash records, and confuses residents who already paid.
+- The archived monthly bills (`<year>/<Month>/output/`) must always match what was actually issued and collected.
+- Society-wide deficit is recovered by adding the undercollected difference across all 113 flats in the current month's common cost:
+  $$\text{Common Recovery per Flat} = \frac{\text{₹}2,889.00}{113 \text{ flats}} = +\text{₹}25.57 \text{ per flat}$$
+
+**Resolution Depends on Whether the Resident Paid the Past Bill**:
+
+#### Branch A: Resident Withheld Payment (Did NOT Pay Last Month - e.g. Flat 413)
+If the resident saw the erroneous ₹3,000+ bill and paid ₹0 in the past month:
+1. **No Credit is Owed**: The resident never paid ₹3,428, so they should NOT have a ~₹3,000 credit carrying forward into future months.
+2. **Add Correct Past Month Bill to Current Month**:
+   - The resident still owes their actual past month water consumption (e.g. September bill with reading 5180 = ₹539.00).
+   - Log a `DEBIT` of `₹539.00` in the `adjustments` tab targeting the current month (`October 2026`).
+3. **Automated Bill Generation**:
+   - The engine calculates the current month gross bill (e.g. October gross = ₹416.00).
+   - Adds the unpaid past month bill: `Adjustment = +539`.
+   - Generates the net payable: `Net Amount = Gross (₹416) + Adjustment (₹539) = ₹955.00`.
+   - `Carry Forward Balance = 0` (resident clears all arrears and starts completely fresh).
+4. **Ledger Reconciliation**:
+   - Both Section 1 and Section 2 update to status `SETTLED` with available balance `₹0.00`.
+   - Total funds collected by the society across both months matches tanker expenditure to the exact rupee (₹267,010 collected vs ₹267,010 paid).
+
+#### Branch B: Resident Already Paid Erroneous Bill (Overpayment Credit Carry-Forward)
+If the resident had already paid the full erroneous bill in the past month:
+1. **Record Credit**: Log a `CREDIT` of ₹2,889 in Section 2 targeting the resident, and record ₹2,889 active balance in Section 1.
+2. **Automated Drawdown**:
+   - Current month gross bill is offset: `Credit Applied = MIN(Available Credit, Gross Bill)`.
+   - Net bill payable is capped at **₹0** for NoBroker Hood compatibility.
+   - Unabsorbed balance (e.g. `₹2,889 - ₹416 = ₹2,473.00`) automatically carries forward to subsequent months until balance reaches ₹0 (`SETTLED`).
 
 ---
 
